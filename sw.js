@@ -1,7 +1,7 @@
 /* daily-report-pipeline service worker
  * Strategy: pre-cache the app shell at install (full offline), then
  * stale-while-revalidate for same-origin GETs. */
-const VERSION = 'drp-v1.0.0';
+const VERSION = 'drp-v1.1.0';
 const SHELL = `${VERSION}-shell`;
 const RUNTIME = `${VERSION}-runtime`;
 
@@ -15,6 +15,8 @@ const PRECACHE = [
   './js/extract.js',
   './js/validate.js',
   './js/dashboard.js',
+  './js/charts.js',
+  './js/insights.js',
   './js/sample-data.js',
   './vendor/pdf.min.js',
   './vendor/pdf.worker.min.js',

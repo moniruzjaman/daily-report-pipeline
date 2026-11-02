@@ -72,6 +72,7 @@ export function validateGrid(grid) {
         where: `«${last.row.label}» · ${grid.headers[c + 1]}`,
         detail: `সারি-যোগ ${fmt(sum)} বনাম মুদ্রিত ${fmt(printed)} — ${ok ? 'সামঞ্জস্য ✓' : `ব্যবধান ${fmt(sum - printed)} ✗`}`,
         cells: ok ? [] : [[last.r, c]],
+        data: { row: last.r, col: c, sum, printed },
       });
       if (!ok) flag(last.r, c, 'fail');
     }
@@ -102,6 +103,7 @@ export function validateGrid(grid) {
           where: `«${row.label}» · ${grid.headers[c + 1]}`,
           detail: `উপাদান-যোগ ${fmt(sum)} বনাম মুদ্রিত ${fmt(printed)} — ${ok ? 'সামঞ্জস্য ✓' : `ব্যবধান ${fmt(sum - printed)} ✗`}`,
           cells: ok ? [] : [[r, c]],
+          data: { row: r, col: c, sum, printed },
         });
         if (!ok) flag(r, c, 'fail');
       }

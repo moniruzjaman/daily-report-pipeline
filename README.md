@@ -16,7 +16,20 @@ leaves the device.
 
 ## Features
 
-- **Input box** — drag-and-drop or browse for `.pdf` / `.docx` / `.txt`; or paste raw text.
+- **Dashboard-first** — the app opens straight onto the verdict banner (health-score
+  ring + one-line verdict), KPI strip, interactive charts and ranked auto-insights.
+  The intake is a tiny **📥 ইনবক্স** widget in the header (drop a file anywhere on the
+  page and it opens automatically); the first visit auto-loads the demo return.
+- **Interactive charts** (hand-rolled canvas — no chart library, offline-safe):
+  section-level target-vs-achievement grouped bars, a zero-centred **variance chart**
+  of every printed-total discrepancy, a per-crop **চলতি লক্ষ্য vs গত অর্জন %** mover
+  chart, check-outcome donut and column fill bars. Hover for exact numbers; click a
+  bar to jump to that row in the grid.
+- **Auto-insights** — a rules engine ranks what a static report cannot show: printed
+  totals that don't match their row sums (with computed-vs-printed values), same-year
+  target/achievement blowups, partially-unreported columns, notable movers — each
+  card links straight to the offending grid row.
+- **Input box** — `.pdf` / `.docx` / `.txt` or pasted text.
 - **Encoding detection** — Unicode Bengali (U+0980–U+09FF) vs legacy Bijoy
   (SutonnyMJ-era high-ASCII) is detected automatically; Bijoy text is converted to
   Unicode using the [bijoy2unicode](https://github.com/JehadurRE/Bijoy2Unicode) engine (MIT).
@@ -35,8 +48,6 @@ leaves the device.
   6. sanity checks — negative values, duplicate labels in one section.
   Each check reports pass / fail / warn with the computed vs printed values, and
   failing cells are outlined red (warnings amber) directly in the grid.
-- **Dashboard** — rows, numeric-cell fill rate, check outcomes donut, per-column
-  fill bars, pass-rate.
 - **Exports** — pipeline result as JSON, grid as CSV (UTF-8 BOM), and a clean
   print/PDF layout.
 - **PWA** — web app manifest, generated icons, service worker pre-caching the whole
@@ -77,7 +88,7 @@ development live in `tests/fixtures/` (Unicode DOCX, Bijoy DOCX, text-layer PDF)
 ## Repository layout
 
 ```
-index.html              app shell
+index.html              app shell (dashboard-first)
 manifest.webmanifest    PWA manifest
 sw.js                   service worker (pre-cache + stale-while-revalidate)
 css/style.css           styles (print layout included)
@@ -85,6 +96,8 @@ js/app.js               pipeline orchestrator + UI wiring
 js/bijoy.js             encoding detection + Bijoy→Unicode wrapper
 js/extract.js           PDF/DOCX/TXT readers + grid parser
 js/validate.js          validation rules engine
+js/charts.js            dependency-free canvas charts (grouped + diverging bars)
+js/insights.js          verdict, ranked auto-insights, chart data shaping
 js/dashboard.js         grid / issues / dashboard rendering + exports
 js/sample-data.js       built-in 02-Nov-2026 sample
 vendor/                 pdf.js, mammoth.js, bijoy2unicode (vendored, offline)

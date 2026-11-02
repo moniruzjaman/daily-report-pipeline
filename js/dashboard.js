@@ -27,7 +27,7 @@ export function renderGrid(gridEl, grid) {
   gridEl.appendChild(thead);
 
   const tbody = document.createElement('tbody');
-  grid.rows.forEach((row) => {
+  grid.rows.forEach((row, r) => {
     const tr = document.createElement('tr');
     if (row.sectionBefore) {
       const st = document.createElement('td');
@@ -38,10 +38,12 @@ export function renderGrid(gridEl, grid) {
       tbody.appendChild(tr);
       tr.dataset.section = row.sectionBefore;
       const tr2 = document.createElement('tr');
+      tr2.dataset.r = r;
       fillRow(tr2, row, grid);
       tbody.appendChild(tr2);
       return;
     }
+    tr.dataset.r = r;
     fillRow(tr, row, grid);
     if (row.isTotal) tr.classList.add('total-row');
     tbody.appendChild(tr);
@@ -84,7 +86,8 @@ export function renderValidation(pillsEl, issuesWrapEl, result, grid) {
       <th>ফলাফল</th><th>নিয়ম</th><th>অবস্থান</th><th>বিস্তারিত</th>
     </tr></thead><tbody>`;
   for (const i of sorted) {
-    html += `<tr><td><span class="sev ${i.sev}">${labelOf[i.sev]}</span></td>
+    const r = i.cells?.[0]?.[0];
+    html += `<tr${r != null ? ` data-r="${r}"` : ''}><td><span class="sev ${i.sev}">${labelOf[i.sev]}</span></td>
       <td>${i.rule}</td><td>${i.where}</td><td>${i.detail}</td></tr>`;
   }
   html += '</tbody></table>';
@@ -104,9 +107,10 @@ export function renderDashboard(el, grid, result) {
   const nCells = grid.rows.reduce((a, r) => a + r.cells.filter((c) => c.val != null).length, 0);
   const totalSlots = grid.rows.length * grid.nCols;
   const fill = totalSlots ? Math.round((nCells / totalSlots) * 100) : 0;
+  const nSections = new Set(grid.rows.map((r) => r.sectionBefore).filter(Boolean)).size || 1;
 
   el.innerHTML = `
-    <div class="kpi"><div class="k-label">Rows parsed</div><div class="k-value">${grid.rows.length}</div><div class="k-sub">সারি</div></div>
+    <div class="kpi"><div class="k-label">Rows parsed</div><div class="k-value">${grid.rows.length}</div><div class="k-sub">সারি · ${nSections} সেকশন</div></div>
     <div class="kpi"><div class="k-label">Numeric cells</div><div class="k-value">${nCells}</div><div class="k-sub">/${totalSlots} ঘর পূর্ণ (${fill}%)</div></div>
     <div class="kpi"><div class="k-label">Checks run</div><div class="k-value">${checksRun}</div><div class="k-sub">যাচাই চালানো হয়েছে</div></div>
     <div class="kpi ${tally.fail ? 'k-red' : 'k-green'}"><div class="k-label">Failed checks</div><div class="k-value">${tally.fail}</div><div class="k-sub">ব্যর্থ</div></div>
@@ -175,7 +179,7 @@ export function buildExport(state) {
   const { grid, result, meta } = state;
   return {
     pipeline: 'daily-report-pipeline',
-    version: '1.0.0',
+    version: '1.1.0',
     exportedAt: new Date().toISOString(),
     document: meta,
     headers: grid.headers,

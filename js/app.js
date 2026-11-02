@@ -1,4 +1,6 @@
 /* app.js — pipeline orchestrator + UI wiring.
+ * v1.1: dashboard-first — the intake lives in a tiny header inbox widget;
+ * the hero page is verdict + KPIs + charts + auto-insights.
  * Stages: read → detect → extract → normalize → parse → validate. */
 
 import { analyseEncoding, normalizeText } from './bijoy.js';
@@ -8,6 +10,11 @@ import {
   renderFileMeta, renderGrid, renderValidation, renderDashboard,
   gridToCsv, buildExport, download,
 } from './dashboard.js';
+import { drawGroupedBars, drawDiverging, scoreRing } from './charts.js';
+import {
+  sectionSeries, varianceItems, deltaItems,
+  buildVerdict, buildInsights, renderInsights,
+} from './insights.js';
 import { SAMPLE_NAME, SAMPLE_TEXT, SAMPLE_NOTE } from './sample-data.js';
 
 const $ = (id) => document.getElementById(id);
@@ -20,6 +27,17 @@ const state = {
   grid: null,
   result: null,
 };
+
+/* ---------------- inbox widget ---------------- */
+
+function inboxOpen(open) {
+  const pop = $('inboxPop');
+  pop.classList.toggle('hidden', !open);
+  $('inboxBtn').setAttribute('aria-expanded', String(open));
+  if (open) $('dropzone').classList.add('drag');
+  else $('dropzone').classList.remove('drag');
+}
+const inboxIsOpen = () => !$('inboxPop').classList.contains('hidden');
 
 /* ---------------- pipeline UI ---------------- */
 
@@ -37,6 +55,7 @@ function alertBox(kind, html) {
   const el = $('inputAlert');
   el.className = `alert ${kind} show`;
   el.innerHTML = html;
+  inboxOpen(true);
 }
 function clearAlert() { $('inputAlert').className = 'alert'; }
 
@@ -71,7 +90,7 @@ async function runPipeline({ name, text, doc }) {
 
     if (state.encoding.encoding === 'bijoy' && !state.normalize.text.trim()) {
       stage('normalize', 'error', 'রূপান্তর ব্যর্থ');
-      alertBox('error', 'বিজয় টেক্সট রূপান্তরে ব্যর্থ — ফাইলটি সম্ভবত পুরোনো বাইনারি .doc (DOCX নয়)। টেক্সট কপি করে "Paste data" ব্যবহার করুন।');
+      alertBox('error', 'বিজয় টেক্সট রূপান্তরে ব্যর্থ — ফাইলটি সম্ভবত পুরোনো বাইনারি .doc (DOCX নয়)। টেক্সট কপি করে "পেস্ট" ব্যবহার করুন।');
       return;
     }
 
@@ -87,7 +106,7 @@ async function processText(text) {
   state.grid = parseGrid(text.split(/\r?\n/).map((t) => ({ text: t })));
   if (!state.grid.rows.length) {
     stage('parse', 'error', 'সারি পাওয়া যায়নি');
-    alertBox('warn', 'কোনো ডেটা-সারি পার্স করা যায়নি। প্রতি লাইনে "নাম সংখ্যা সংখ্যা ..." ফরম্যাট আশা করা হয়েছে — "Paste data" থেকে ম্যানুয়ালি দেওয়ার চেষ্টা করুন।');
+    alertBox('warn', 'কোনো ডেটা-সারি পার্স করা যায়নি। প্রতি লাইনে "নাম সংখ্যা সংখ্যা ..." ফরম্যাট আশা করা হয়েছে — "পেস্ট" থেকে ম্যানুয়ালি দেওয়ার চেষ্টা করুন।');
     return;
   }
   stage('parse', 'done', `${state.grid.rows.length} rows × ${state.grid.nCols} cols`);
@@ -97,16 +116,84 @@ async function processText(text) {
   stage('validate', state.result.tally.fail ? 'error' : 'done',
     `${state.result.tally.pass}✓ ${state.result.tally.fail}✗ ${state.result.tally.warn}!`);
 
-  // render everything (grid last so it draws the fresh cell flags)
+  // render everything (visible first so canvases measure, then draw)
   renderDocMeta();
+  showDataCards(true);
+  renderHero();
   renderValidation($('valPills'), $('issuesWrap'), state.result, state.grid);
   renderDashboard($('kpis'), state.grid, state.result);
-  showDataCards(true);
+  renderCharts();
+  renderInsights($('insightsList'), buildInsights(state.grid, state.result));
   renderGrid($('grid'), state.grid);
 
   if (state.encoding.encoding === 'bijoy') {
     alertBox('info', 'বিজয় (SutonnyMJ) এনকোডিং সনাক্ত হয়েছে — টেক্সট ইউনিকোডে রূপান্তর করা হয়েছে ✓');
+  } else {
+    inboxOpen(false); // done — get the inbox out of the way, show the dashboard
   }
+}
+
+/* ---------------- hero + charts ---------------- */
+
+function renderHero() {
+  const v = buildVerdict(state.result);
+  $('verdictBanner').innerHTML = `
+    ${scoreRing(v.score, v.cls)}
+    <div>
+      <p class="v-title">${v.title}</p>
+      <div class="v-sub">${v.sub} · <b>${escapeHtml(state.fileName || '')}</b>${state.encoding ? ` · ${state.encoding.label}` : ''}</div>
+    </div>`;
+}
+
+function renderCharts() {
+  const grid = state.grid, result = state.result;
+
+  // section comparison (targets vs achievements)
+  const { groups, series } = sectionSeries(grid);
+  drawGroupedBars($('chartTargets'), {
+    groups, series,
+    legendEl: $('chartTargetsLegend'),
+    onClick: (g) => { if (g.row != null) jumpToRow(g.row); },
+  });
+
+  // printed-total variance (failed totals only)
+  const items = varianceItems(grid, result);
+  const note = $('varianceNote');
+  if (items.length) {
+    const maxAbs = Math.max(...items.map((it) => Math.abs(it.value)));
+    drawDiverging($('chartVariance'), {
+      items,
+      cap: Math.min(maxAbs, Math.max(...items.map((it) => Math.abs(it.value)).filter((v) => v < maxAbs * 0.6), maxAbs * 0.35)),
+      onClick: (it) => jumpToRow(it.row),
+    });
+    note.textContent = `${items.length}টি মোট-ঘরে সারি-যোগ ও মুদ্রিত সংখ্যার ব্যবধান (বারের প্রান্তে ▸ মানে স্কেল কাটা হয়েছে)।`;
+  } else {
+    drawDiverging($('chartVariance'), { items: [], cap: 1 });
+    note.textContent = 'কোনো ব্যবধান নেই — সব মুদ্রিত মোট সারি-যোগের সাথে মিলেছে ✓';
+  }
+
+  // year-over-year delta per crop
+  const deltas = deltaItems(grid);
+  if (deltas.length) {
+    const cap = Math.min(100, Math.max(20, ...deltas.map((d) => Math.abs(d.value)).filter((v) => v < 400)));
+    drawDiverging($('chartDelta'), {
+      items: deltas,
+      cap,
+      onClick: (it) => jumpToRow(it.row),
+    });
+  } else {
+    drawDiverging($('chartDelta'), { items: [], cap: 1 });
+  }
+}
+
+function jumpToRow(r) {
+  const tr = document.querySelector(`#grid tr[data-r="${r}"]`);
+  if (!tr) return;
+  document.getElementById('docCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  setTimeout(() => {
+    tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    tr.classList.remove('flash'); void tr.offsetWidth; tr.classList.add('flash');
+  }, 250);
 }
 
 function renderDocMeta() {
@@ -138,6 +225,7 @@ async function handleFile(file) {
   clearAlert();
   resetStages();
   stage('read', 'active', `${(file.size / 1024).toFixed(0)} KB`);
+  inboxOpen(true);
   try {
     const doc = await readFileAny(file, (p, total) => stage('extract', 'active', `পৃষ্ঠা ${p}/${total}`));
     if (doc.kind === 'pdf' && !doc.hasTextLayer) {
@@ -145,7 +233,7 @@ async function handleFile(file) {
       stage('extract', 'error', 'টেক্সট-লেয়ার নেই');
       alertBox('warn',
         `<b>স্ক্যান করা PDF (টেক্সট-লেয়ার নেই)।</b> এই সংস্করণে OCR নেই — দুটি উপায়:<br>
-         ১. PDF থেকে টেক্সট কপি করে <b>"Paste data"</b> বক্সে পেস্ট করুন (প্রতি লাইনে: নাম সংখ্যা সংখ্যা …)।<br>
+         ১. PDF থেকে টেক্সট কপি করে <b>"পেস্ট"</b> বক্সে পেস্ট করুন (প্রতি লাইনে: নাম সংখ্যা সংখ্যা …)।<br>
          ২. অফিসের কম্পিউটারে ফাইলটি DOCX হিসেবে সেভ/টাইপ করে আপলোড করুন — DOCX পুরোপুরি সমর্থিত।`);
       return;
     }
@@ -204,6 +292,9 @@ function runRecheck() {
   state.result = validateGrid(state.grid);
   renderValidation($('valPills'), $('issuesWrap'), state.result, state.grid);
   renderDashboard($('kpis'), state.grid, state.result);
+  renderHero();
+  renderCharts();
+  renderInsights($('insightsList'), buildInsights(state.grid, state.result));
   renderGrid($('grid'), state.grid);
 }
 
@@ -218,18 +309,41 @@ function safeName() {
 function wire() {
   const dz = $('dropzone');
   const fi = $('fileInput');
+  const openInbox = () => inboxOpen(true);
+
+  $('inboxBtn').addEventListener('click', () => inboxOpen(!inboxIsOpen()));
+  $('emptyInboxBtn').addEventListener('click', openInbox);
+  document.addEventListener('click', (e) => {
+    if (!inboxIsOpen()) return;
+    if (e.target.closest('#inboxPop') || e.target.closest('#inboxBtn')) return;
+    // keep open while a pipeline alert is showing
+    if ($('inputAlert').classList.contains('show')) return;
+    inboxOpen(false);
+  });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') inboxOpen(false); });
+
+  // dropping a file anywhere on the page opens the inbox
+  ['dragenter', 'dragover'].forEach((ev) => window.addEventListener(ev, (e) => {
+    e.preventDefault(); openInbox(); dz.classList.add('drag');
+  }));
+  ['dragleave', 'drop'].forEach((ev) => window.addEventListener(ev, (e) => {
+    e.preventDefault(); dz.classList.remove('drag');
+  }));
+  window.addEventListener('drop', (e) => {
+    if (e.dataTransfer?.files?.[0]) handleFile(e.dataTransfer.files[0]);
+  });
+
   dz.addEventListener('click', () => fi.click());
   dz.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') fi.click(); });
-  ['dragenter', 'dragover'].forEach((ev) => dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add('drag'); }));
-  ['dragleave', 'drop'].forEach((ev) => dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.remove('drag'); }));
-  dz.addEventListener('drop', (e) => handleFile(e.dataTransfer.files[0]));
   fi.addEventListener('change', () => handleFile(fi.files[0]));
 
-  $('sampleBtn').addEventListener('click', () => {
-    renderFileMeta($('fileMeta'), [['ফাইল', escapeHtml(SAMPLE_NAME)], ['ধরন', 'SAMPLE']]);
+  const loadSample = (quiet) => {
+    renderFileMeta($('fileMeta'), [['ফাইল', escapeHtml(SAMPLE_NAME)], ['ধরন', 'SAMPLE · ডেমো']]);
     runPipeline({ name: SAMPLE_NAME, text: SAMPLE_TEXT, doc: { kind: 'sample', pages: 1, text: SAMPLE_TEXT, hasTextLayer: true } });
-    if (SAMPLE_NOTE) setTimeout(() => alertBox('info', SAMPLE_NOTE), 50);
-  });
+    if (!quiet && SAMPLE_NOTE) setTimeout(() => alertBox('info', SAMPLE_NOTE), 50);
+  };
+  $('sampleBtn').addEventListener('click', () => loadSample(false));
+  $('emptySampleBtn').addEventListener('click', () => loadSample(false));
 
   $('pasteToggle').addEventListener('click', () => {
     $('pasteWrap').classList.toggle('hidden');
@@ -254,6 +368,14 @@ function wire() {
 
   $('recheckBtn').addEventListener('click', runRecheck);
 
+  // jump links from insights + issues table
+  document.addEventListener('click', (e) => {
+    const jump = e.target.closest('.ins-jump');
+    if (jump) { jumpToRow(Number(jump.dataset.r)); return; }
+    const issueRow = e.target.closest('table.issues tbody tr');
+    if (issueRow && issueRow.dataset.r !== undefined) jumpToRow(Number(issueRow.dataset.r));
+  });
+
   $('expJson').addEventListener('click', () => {
     if (!state.grid) return;
     const doc = { file: state.fileName, kind: state.doc?.kind, encoding: state.encoding?.label, converted: state.normalize?.converted };
@@ -273,6 +395,9 @@ function wire() {
   window.addEventListener('online', upd);
   window.addEventListener('offline', upd);
   upd();
+
+  // first visit: put the demo dashboard on stage immediately
+  loadSample(true);
 }
 
 /* ---------------- PWA ---------------- */
