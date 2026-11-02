@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="bn">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Daily Report Pipeline — দৈনিক প্রতিবেদন পাইপলাইন</title>
+  <meta name="description" content="Upload a daily return (PDF/DOCX, Unicode or Bijoy), extract the data grid, run validation checks and view a dashboard — offline PWA.">
+  <meta name="theme-color" content="#16323f">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body data-view="empty">
+
+<header class="top">
+  <div class="top-inner">
+    <div class="brand">
+      <img src="icons/icon-192.png" alt="">
+      <div>
+        <h1>Daily Report Pipeline</h1>
+        <div class="sub">দৈনিক প্রতিবেদন পাইপলাইন — DAE daily return intelligence</div>
+      </div>
+    </div>
+    <div class="top-actions">
+      <span class="badge" id="netBadge"><span class="dot"></span><span id="netLabel">online</span></span>
+      <button id="installBtn" class="ghost">Install app ⤓</button>
+    </div>
+  </div>
+</header>
+
+<div class="app">
+
+  <div class="alert info" id="protoAlert" style="margin-top:16px">
+    এই অ্যাপটি একটি ওয়েব অ্যাপ — <code>file://</code> থেকে নয়, একটি লোকাল সার্ভার থেকে চালান:
+    <code>python3 -m http.server 8080</code> → <code>http://localhost:8080</code>
+  </div>
+
+  <!-- STEP 1 · INPUT -->
+  <section class="card" id="inputCard">
+    <h2><span class="step-no">১</span> ইনপুট · Upload the daily return</h2>
+    <p class="hint">PDF বা DOCX — ইউনিকোড অথবা বিজয় (সুতন্নিMJ) ফন্ট, দুটোই চলবে। সব প্রসেসিং ব্রাউজারেই হয়; কোনো ফাইল সার্ভারে যায় না।</p>
+
+    <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="Upload PDF or DOCX">
+      <div class="big">📄 ফাইল এখানে ড্রপ করুন বা ক্লিক করে বাছুন</div>
+      <div class="small">Drop the daily return here — .pdf · .docx · .txt — or click to browse</div>
+      <input type="file" id="fileInput" accept=".pdf,.docx,.txt" class="hidden">
+    </div>
+
+    <div class="file-meta hidden" id="fileMeta"></div>
+
+    <div class="row-btns">
+      <button id="sampleBtn" class="slate">স্যাম্পল লোড করুন · Load ০২-নভে-২০২৬ sample</button>
+      <button id="pasteToggle" class="slate">হাতে লেখা/পেস্ট · Paste data</button>
+      <button id="resetBtn" class="ghost" style="color:var(--muted);border-color:var(--line)">রিসেট</button>
+    </div>
+
+    <div id="pasteWrap" class="hidden">
+      <textarea id="pasteBox" placeholder="প্রতি লাইনে এক সারি — নাম তারপর সংখ্যাগুলো ফাঁকা দিয়ে। যেমন:&#10;হাইব্রিড 1130 1430 1130 1165&#10;উফশী 6150 5550 6150 6180&#10;মোট 7685 7430 7685 7680"></textarea>
+      <div class="row-btns"><button id="pasteRun">পাইপলাইন চালান ▸</button></div>
+    </div>
+
+    <!-- pipeline stages -->
+    <div class="pipeline" id="pipeline">
+      <div class="stage" data-stage="read"><span class="st-name">১. Read</span><span class="st-note">file</span></div>
+      <div class="stage" data-stage="detect"><span class="st-name">২. Detect</span><span class="st-note">encoding</span></div>
+      <div class="stage" data-stage="extract"><span class="st-name">৩. Extract</span><span class="st-note">text/grid</span></div>
+      <div class="stage" data-stage="normalize"><span class="st-name">৪. Normalize</span><span class="st-note">bijoy→unicode</span></div>
+      <div class="stage" data-stage="parse"><span class="st-name">৫. Parse grid</span><span class="st-note">rows×cols</span></div>
+      <div class="stage" data-stage="validate"><span class="st-name">৬. Validate</span><span class="st-note">checks</span></div>
+    </div>
+
+    <div class="alert" id="inputAlert"></div>
+  </section>
+
+  <!-- STEP 2 · DOCUMENT -->
+  <section class="card needs-data hidden" id="docCard">
+    <h2><span class="step-no">২</span> ডকুমেন্ট · What was read</h2>
+    <p class="hint">সনাক্তকরণ ফলাফল — এনকোডিং বা পার্সিং ভুল মনে হলে সরাসরি টেবিলে ঠিক করে নিন (সেলে ক্লিক করে এডিট)।</p>
+    <div class="file-meta" id="docMeta"></div>
+    <div class="grid-wrap">
+      <table class="grid" id="grid"></table>
+    </div>
+    <p class="hint" style="margin-top:8px">লাল ঘর = যাচাইয়ে ব্যর্থ, হলুদ ঘর = সন্দেহজনক। হেডার সারিটিও এডিটযোগ্য।</p>
+    <div class="row-btns">
+      <button id="recheckBtn" class="slate">আবার যাচাই · Run checks</button>
+    </div>
+  </section>
+
+  <!-- STEP 3 · VALIDATION -->
+  <section class="card needs-data hidden" id="valCard">
+    <h2><span class="step-no">৩</span> যাচাই · Validation checks</h2>
+    <p class="hint">যোগফল, লক্ষ্য-অর্জন, ফলন×জমি=উৎপাদন ও সার-মজুদ হিসাব — মুদ্রিত সংখ্যার সাথে মিলিয়ে দেখা হয়।</p>
+    <div class="pills" id="valPills"></div>
+    <div id="issuesWrap"></div>
+  </section>
+
+  <!-- STEP 4 · DASHBOARD -->
+  <section class="card needs-data hidden" id="dashCard">
+    <h2><span class="step-no">৪</span> ড্যাশবোর্ড · Pipeline dashboard</h2>
+    <div class="kpis" id="kpis"></div>
+    <div class="dash-grid">
+      <div class="panel">
+        <h3>Check outcomes</h3>
+        <svg id="donut" viewBox="0 0 120 120" width="130" height="130" role="img" aria-label="check outcomes donut"></svg>
+        <ul class="legend" id="donutLegend"></ul>
+      </div>
+      <div class="panel">
+        <h3>Column fill rate (cells present / rows)</h3>
+        <div class="hbar" id="colFill"></div>
+      </div>
+    </div>
+    <div class="export-bar no-print">
+      <button id="expJson">⤓ JSON</button>
+      <button id="expCsv" class="slate">⤓ CSV</button>
+      <button id="expPrint" class="slate">🖨 Print / PDF</button>
+    </div>
+  </section>
+
+  <footer>
+    Daily Report Pipeline v1.0.0 · works offline (installable PWA) ·
+    Bijoy conversion: <a href="https://github.com/JehadurRE/Bijoy2Unicode" target="_blank" rel="noopener">bijoy2unicode</a> (MIT) ·
+    PDF: <a href="https://mozilla.github.io/pdf.js/" target="_blank" rel="noopener">pdf.js</a> (Apache-2.0) · DOCX: <a href="https://github.com/mwilliamson/mammoth.js" target="_blank" rel="noopener">mammoth.js</a> (BSD-2)
+  </footer>
+</div>
+
+<script src="vendor/pdf.min.js"></script>
+<script src="vendor/mammoth.browser.min.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

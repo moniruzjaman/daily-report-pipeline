@@ -1,0 +1,19 @@
+{
+  "name": "Daily Report Pipeline — DAE Daily Return Intelligence",
+  "short_name": "DailyReport",
+  "description": "Upload a daily return (PDF/DOCX, Unicode or Bijoy), extract the data grid, run validation checks and view a dashboard — fully offline, in the browser.",
+  "lang": "bn",
+  "dir": "ltr",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f5f1e8",
+  "theme_color": "#16323f",
+  "categories": ["productivity", "business", "utilities"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
