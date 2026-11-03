@@ -8,10 +8,17 @@ import { JSDOM } from 'jsdom';
 const dom = new JSDOM('<!doctype html><html><body></body></html>');
 globalThis.window = globalThis.window || dom.window;
 globalThis.DOMParser = dom.window.DOMParser;
-if (!globalThis.Worker) {
-  // simulate a sandbox where Worker construction fails → pdf.js must use fake worker
-  globalThis.Worker = class { constructor() { throw new Error('Worker blocked'); } };
-}
+// pdf.js references bare `document`/`navigator` on some paths even when running
+// headless — mirror jsdom's globals onto globalThis like a real browser would.
+if (typeof globalThis.document === 'undefined') globalThis.document = dom.window.document;
+if (typeof globalThis.navigator === 'undefined') globalThis.navigator = dom.window.navigator;
+
+// Simulate a sandboxed iframe (the common "can't parse PDF" environment):
+// Worker construction THROWS, so extract.js must fall back to the main-thread
+// fake worker loaded from vendor/pdf.worker.min.js via dynamic import().
+globalThis.Worker = class {
+  constructor() { throw new Error("Failed to construct 'Worker': The URL scheme is not supported."); }
+};
 
 // Load the REAL vendored UMD build the same way a browser <script> would.
 const { readFileSync: _read } = await import('node:fs');
@@ -20,16 +27,25 @@ const pdfjs = globalThis['pdfjs-dist/build/pdf']?.pdfjsLib ?? globalThis.pdfjsLi
 if (!pdfjs || typeof pdfjs.getDocument !== 'function') throw new Error('vendored pdf.min.js did not expose a usable pdfjsLib global');
 globalThis.pdfjsLib = pdfjs;
 console.log('✓ vendored pdf.min.js exposes a usable pdfjsLib (version', pdfjs.version + ')');
-// In Node there is no document.currentScript; point the fallback worker at a CJS-loadable file.
-const { createRequire } = await import('node:module');
-const require_ = createRequire(import.meta.url);
-require_.cache[require_.resolve('/workspace/vendor/pdf.worker.min.js')] =
-  require_(require_.resolve('pdfjs-dist/build/pdf.worker.js'));
-// Also make sure `typeof document` behaves like a browser for the UMD origin checks.
 
-// mammoth for docx
-const mammoth = (await import('mammoth')).default ?? (await import('mammoth'));
-globalThis.mammoth = mammoth;
+// Route the absolute asset URLs extract.js builds (vendor/*, cmaps, fonts) to disk.
+const origFetch = globalThis.fetch;
+globalThis.fetch = async (input, ...rest) => {
+  const u = String(input?.url ?? input);
+  let m = u.match(/vendor\/(cmaps|standard_fonts)\/(.*)$/);
+  if (m) return origFetch(`file:///workspace/node_modules/pdfjs-dist/${m[1]}/${m[2]}`, ...rest);
+  m = u.match(/\/vendor\/(.+)$/);
+  if (m) return origFetch(`file:///workspace/vendor/${m[1]}`, ...rest);
+  return origFetch(input, ...rest);
+};
+
+// Load the REAL vendored browser mammoth exactly like index.html does (<script>).
+(0, eval)(_read('/workspace/vendor/mammoth.browser.min.js', 'utf8'));
+globalThis.mammoth = globalThis.mammoth || dom.window.mammoth;
+if (!globalThis.mammoth || typeof globalThis.mammoth.convertToHtml !== 'function') {
+  throw new Error('vendored mammoth.browser.min.js did not expose window.mammoth');
+}
+console.log('✓ vendored mammoth.browser.min.js exposes window.mammoth');
 
 const { readFileAny, parseGrid } = await import('../js/extract.js');
 const { analyseEncoding, normalizeText } = await import('../js/bijoy.js');

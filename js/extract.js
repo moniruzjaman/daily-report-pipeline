@@ -1,6 +1,159 @@
-/* extract.js — file readers (PDF / DOCX / TXT) + text → grid parser. */
+/* extract.js — file readers (PDF / DOCX / TXT, with OCR for scanned PDFs) + text → grid parser. */
 
 import { foldDigits } from './bijoy.js';
+
+/* ---------------- OCR (tesseract.js, lazy-loaded) ---------------- */
+
+/**
+ * tesseract.js is vendored but NOT preloaded (it's ~50 KB core + ~10 MB of
+ * language data fetched on first use). We load it only when a document has no
+ * text layer, so normal PDFs/DOCX stay fast and fully offline after the first
+ * OCR run (the language model gets cached by the browser / service worker).
+ */
+let ocrWorkerPromise = null;
+let ocrLangLoaded = null; // 'ben' once Bengali works, 'eng' if we had to fall back
+
+export function isOcrAvailable() {
+  try {
+    new Worker(vendorUrl('tesseract.worker.min.js'), { name: 'TesseractWorker' });
+    return true;
+  } catch {
+    return false; // sandboxed iframe / CSP blocks Workers → OCR impossible
+  }
+}
+
+async function getOcrWorker(onProgress) {
+  if (!ocrWorkerPromise) {
+    ocrWorkerPromise = (async () => {
+      const src = vendorUrl('tesseract.worker.min.js');
+      const res = await fetch(src);
+      if (!res.ok) throw new Error(`OCR লাইব্রেরি লোড হয়নি (${res.status})`);
+      const code = await res.text();
+      // Indirect eval → UMD attaches createWorker to globalThis (like a <script>).
+      (0, eval)(code + '\n//# sourceURL=' + src);
+      const T = globalThis.Tesseract;
+      if (!T || typeof T.createWorker !== 'function') {
+        throw new Error('tesseract.worker.min.js did not expose Tesseract.createWorker');
+      }
+      const opts = {
+        workerPath: src,
+        corePath: vendorUrl('tesseract-core/'),
+        workerBlobURL: false,
+        logger: (m) => { if (m && m.status) onProgress(m.status, Math.round((m.progress || 0) * 100)); },
+      };
+      // Bengali first; silently fall back to English if its traineddata is missing.
+      let worker, lang = 'ben';
+      try {
+        worker = await T.createWorker(opts, 'ben', { cachePath: vendorUrl('tesseract-lang/') });
+      } catch (e1) {
+        lang = 'eng';
+        try {
+          worker = await T.createWorker(opts, 'eng', { cachePath: vendorUrl('tesseract-lang/') });
+        } catch (e2) {
+          throw new Error(`OCR মডেল ডাউনলোড ব্যর্থ (${(e1 && e1.message) || e1}) — ইন্টারনেট সংযোগ পরীক্ষা করুন অথবা টেক্সট "পেস্ট" করুন।`);
+        }
+      }
+      ocrLangLoaded = lang;
+      return worker;
+    })().catch((err) => { ocrWorkerPromise = null; throw err; });
+  }
+  return ocrWorkerPromise;
+}
+
+/** Render one pdf.js page to a bitmap suitable for OCR (~300 dpi effective). */
+async function renderPageForOcr(page) {
+  const vp1 = page.getViewport({ scale: 1 });
+  const MAX_SIDE = 2600;
+  let scale = Math.max(2, Math.min(3, MAX_SIDE / Math.max(vp1.width, vp1.height)));
+  const viewport = page.getViewport({ scale });
+  let canvas, ctx;
+  try {
+    canvas = new OffscreenCanvas(Math.floor(viewport.width), Math.floor(viewport.height));
+    ctx = canvas.getContext('2d', { alpha: false });
+  } catch {
+    canvas = document.createElement('canvas');
+    canvas.width = Math.floor(viewport.width);
+    canvas.height = Math.floor(viewport.height);
+    ctx = canvas.getContext('2d', { alpha: false });
+  }
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  return canvas;
+}
+
+/**
+ * OCR a scanned PDF. Renders each page through pdf.js and runs tesseract.js
+ * over the bitmaps. Throws a friendly error if Workers are unavailable or the
+ * OCR engine cannot be loaded. `onProgress(page, total, status)` reports both
+ * page advancement and in-page recognition progress.
+ */
+export async function ocrPdf(file, onProgress = () => {}, { maxPages = 12 } = {}) {
+  const lib = getPdfjsLib();
+  configurePdfWorker(lib);
+  if (typeof Worker === 'undefined' || !isOcrAvailable()) {
+    throw new Error('এই পরিবেশে Worker ব্লকড — OCR চালানো যায় না (স্যান্ডবক্সড প্রিভিউ)। ব্রাউজারে সরাসরি খুলুন, অথবা টেক্সট কপি করে "পেস্ট" করুন।');
+  }
+  const raw = await file.arrayBuffer();
+  const data = new Uint8Array(raw);
+  const params = () => ({
+    data: data.slice(0),
+    disableAutoFetch: true,
+    disableStream: true,
+    isEvalSupported: false,
+    cMapUrl: vendorUrl('cmaps/'),
+    cMapPacked: true,
+    standardFontDataUrl: vendorUrl('standard_fonts/'),
+  });
+  let pdf;
+  try {
+    pdf = await lib.getDocument(params()).promise;
+  } catch (err) {
+    if (lib.GlobalWorkerOptions?.workerPort) {
+      try { lib.GlobalWorkerOptions.workerPort.terminate(); } catch { /* ignore */ }
+      lib.GlobalWorkerOptions.workerPort = null;
+    }
+    await loadFakeWorker(lib);
+    pdf = await lib.getDocument(params()).promise;
+  }
+  const numPages = pdf.numPages || 1;
+  const limit = Math.min(numPages, maxPages);
+  let worker = null;
+  const lines = [];
+  try {
+    worker = await getOcrWorker((status, pct) => onProgress(ocrCurPage, limit, `${status} ${pct}%`));
+    for (let p = 1; p <= limit; p++) {
+      ocrCurPage = p;
+      onProgress(p, limit, 'রেন্ডার');
+      const page = await pdf.getPage(p);
+      const canvas = await renderPageForOcr(page);
+      onProgress(p, limit, 'OCR');
+      const { data: out } = await worker.recognize(canvas);
+      for (const l of String(out.text || '').split(/\r?\n/)) {
+        const t = l.replace(/\s+/g, ' ').trim();
+        if (t) lines.push({ text: t, page: p, ocr: true });
+      }
+    }
+  } finally {
+    if (worker) { try { await worker.terminate(); } catch { /* ignore */ } }
+    ocrWorkerPromise = null; // fresh worker next time (lang/model may change)
+    try { await pdf.destroy(); } catch { /* ignore */ }
+  }
+  ocrCurPage = 0;
+  const text = lines.map((l) => l.text).join('\n');
+  if (!text.replace(/\s/g, '').length) {
+    throw new Error('OCR কোনো টেক্সট পায়নি — ছবির মান (resolution) কম হতে পারে। স্ক্যান আরও পরিষ্কার করে আবার চেষ্টা করুন।');
+  }
+  return {
+    kind: 'pdf',
+    pages: numPages,
+    ocrPages: limit,
+    ocrLang: ocrLangLoaded || 'ben',
+    lines,
+    text,
+    hasTextLayer: true, // content now available via OCR
+    viaOcr: true,
+  };
+}
+let ocrCurPage = 0;
 
 /* ---------------- helpers ---------------- */
 
@@ -9,44 +162,129 @@ function getPdfjsLib() {
   const g = globalThis;
   const lib = g.pdfjsLib || g['pdfjs-dist/build/pdf']?.pdfjsLib || g.PDFJS;
   if (!lib || typeof lib.getDocument !== 'function') {
-    throw new Error('pdf.js লোড হয়নি (vendor/pdf.min.js)। পেজ রিলোড করুন।');
+    throw new Error('PDF লাইব্রেরি (vendor/pdf.min.js) লোড হয়নি — index.html-এর script ট্যাগ পরীক্ষা করুন, অথবা একবার hard-refresh / Service Worker ক্যাশ রিসেট দিন।');
   }
   return lib;
 }
 
-/** Configure the pdf.js worker once; fall back to a same-origin fake worker if needed. */
+/** Absolute, page-independent URL for a vendored asset (correct under any base path). */
+function vendorUrl(name) {
+  try {
+    return new URL(`../vendor/${name}`, import.meta.url).href;
+  } catch {
+    return `vendor/${name}`;
+  }
+}
+
+/**
+ * Configure the pdf.js worker once. Strategy:
+ *   1. create a real same-origin Worker ourselves and hand it over as
+ *      workerPort — immune to blob:-worker CSP restrictions and correct
+ *      under any deployment base path;
+ *   2. plain absolute workerSrc string (pdf.js builds its own worker);
+ *   3. on failure → main-thread "fake worker" loaded from the vendored
+ *      pdf.worker.min.js script (see loadFakeWorker) — never fails with
+ *      "can't parse PDF" just because Workers are blocked.
+ */
 let pdfConfigured = false;
-function ensurePdfWorker(lib) {
+let fakeWorkerPromise = null;
+
+function configurePdfWorker(lib) {
   if (pdfConfigured) return;
   try {
-    lib.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js';
-    // In some sandboxes Worker/blob URLs are blocked; pdf.js then needs eval-based
-    // fake workers disabled so it can load the worker module via import().
-    if (typeof window === 'undefined' || !window.Worker) {
-      lib.GlobalWorkerOptions.isEvalSupported = false;
+    const workerSrc = vendorUrl('pdf.worker.min.js');
+    lib.GlobalWorkerOptions.workerSrc = workerSrc;
+    if (typeof Worker !== 'undefined' && !lib.GlobalWorkerOptions.workerPort) {
+      try {
+        // Real browser environment: use our own same-origin classic worker.
+        lib.GlobalWorkerOptions.workerPort = new Worker(workerSrc, { type: 'classic' });
+      } catch { /* Worker blocked (sandbox/CSP) — readPdf falls back below */ }
     }
   } catch { /* older builds without GlobalWorkerOptions — ignore */ }
   pdfConfigured = true;
 }
 
+/**
+ * Load vendor/pdf.worker.min.js into the current context and register it as
+ * pdf.js's main-thread "fake worker". Works both in the browser (sandboxed
+ * iframes where `new Worker` is blocked) and in Node smoke tests.
+ * The UMD build attaches its export to `globalThis["pdfjs-dist/build/pdf.worker"]`.
+ */
+async function loadFakeWorker(lib) {
+  if (!fakeWorkerPromise) {
+    fakeWorkerPromise = (async () => {
+      const src = vendorUrl('pdf.worker.min.js');
+      const res = await fetch(src);
+      if (!res.ok) throw new Error(`worker fetch failed (${res.status})`);
+      const code = await res.text();
+      // Indirect eval runs the UMD with globalThis as its window — same effect
+      // as a <script> tag, without needing CSP-unsafe inline script elements.
+      (0, eval)(code + '\n//# sourceURL=' + src);
+      const exported = globalThis['pdfjs-dist/build/pdf.worker']?.pdfjsWorker
+        ?? globalThis.pdfjsWorker
+        ?? globalThis['pdfjs-dist/build/pdf.worker'];
+      const handler = exported?.WorkerMessageHandler;
+      if (!handler) throw new Error('pdf.worker.min.js did not export WorkerMessageHandler');
+      if (lib.GlobalWorkerOptions) lib.GlobalWorkerOptions.workerPort = null;
+      // pdf.js ≥3.10 API takes the whole worker-module object; older ones take
+      // the named param object. Pass both shapes so either version works.
+      lib.setupFakeWorkerGlobal({ Promise, WorkerMessageHandler: handler, pdfjsWorker: exported });
+      return handler;
+    })().catch((err) => { fakeWorkerPromise = null; throw err; });
+  }
+  return fakeWorkerPromise;
+}
+
 /* ---------------- readers ---------------- */
 
-export async function readPdf(file, onProgress = () => {}) {
+/**
+ * Open a PDF with pdf.js, transparently falling back to pdf.js's main-thread
+ * "fake worker" when real Workers are blocked (sandboxed previews / strict CSP)
+ * — this is what previously surfaced as "can't parse PDF".
+ */
+async function openPdf(file) {
   const lib = getPdfjsLib();
-  ensurePdfWorker(lib);
-  const buf = await file.arrayBuffer();
-  let pdf;
+  configurePdfWorker(lib);
+  const raw = await file.arrayBuffer();
+  // pdf.js may transfer/detach the ArrayBuffer it receives — always hand it a fresh copy.
+  const data = new Uint8Array(raw);
+  const params = () => ({
+    data: data.slice(0),
+    disableAutoFetch: true,
+    disableStream: true,
+    isEvalSupported: false,
+    cMapUrl: vendorUrl('cmaps/'),
+    cMapPacked: true,
+    standardFontDataUrl: vendorUrl('standard_fonts/'),
+  });
   try {
-    pdf = await lib.getDocument({ data: buf, isEvalSupported: false }).promise;
+    const pdf = await lib.getDocument(params()).promise;
+    return pdf;
   } catch (err) {
-    // Common failure in sandboxed contexts: worker creation blocked → retry without eval.
-    if (/worker/i.test(String(err && err.message))) {
-      lib.GlobalWorkerOptions.workerSrc = '';
-      pdf = await lib.getDocument({ data: buf, disableAutoFetch: true, isEvalSupported: false }).promise;
-    } else {
-      throw err;
+    const msg = String((err && (err.message || err.name)) || err);
+    if (/password/i.test(msg)) {
+      throw new Error('PDF-ু পাসোয়ার্ড দিয়ে সুরক্ষিত — আনপ্রোটেক্ট করে আবার দিন।');
     }
+    if (/worker|blob|URL|scheme|import|module|Failed to construct/i.test(msg)) {
+      // Worker creation was blocked (sandboxed iframe / strict CSP). Fall back to
+      // pdf.js's main-thread "fake worker" instead of failing with "can't parse PDF".
+      try {
+        if (lib.GlobalWorkerOptions?.workerPort) {
+          try { lib.GlobalWorkerOptions.workerPort.terminate(); } catch { /* ignore */ }
+          lib.GlobalWorkerOptions.workerPort = null;
+        }
+        await loadFakeWorker(lib);
+        return await lib.getDocument(params()).promise;
+      } catch (err2) {
+        throw new Error(`PDF প্রসেসিং ব্যথ (জবিক্ষার ফলব্য্): ${err2 && err2.message ? err2.message : err2}`);
+      }
+    }
+    throw new Error(`PDF প্রসেসিং ব্যথ: ${msg}`);
   }
+}
+
+/** Extract layout-aware lines from an already-opened pdf.js document. */
+async function extractPdfLines(pdf, onProgress = () => {}) {
   const numPages = pdf.numPages || 1;
   const pages = [];
   for (let p = 1; p <= numPages; p++) {
@@ -56,17 +294,37 @@ export async function readPdf(file, onProgress = () => {}) {
     const lines = groupIntoLines(tc.items).map((l) => ({ ...l, page: p }));
     pages.push(lines);
   }
-  const allLines = pages.flat();
   // keep only non-empty lines; rebuild text from them so doc.lines and doc.text
   // stay aligned one-line-per-row for the grid parser
-  const kept = allLines.filter((l) => l.text);
+  const kept = pages.flat().filter((l) => l.text);
   const text = kept.map((l) => l.text).join('\n');
+  return { text, lines: kept, numPages };
+}
+
+/**
+ * Read a PDF. If it has no embedded text layer (i.e. it is a scan) and OCR is
+ * possible in this environment, automatically render the pages through pdf.js
+ * and run tesseract.js over them. Pass { tryOcr:false } to skip that.
+ */
+export async function readPdf(file, onProgress = () => {}, { tryOcr = true } = {}) {
+  const pdf = await openPdf(file);
+  let out;
+  try {
+    out = await extractPdfLines(pdf, (p, total) => onProgress(p, total));
+  } finally {
+    try { await pdf.destroy(); } catch { /* ignore */ }
+  }
+  const hasTextLayer = out.text.replace(/\s/g, '').length > 20;
+  if (!hasTextLayer && tryOcr && isOcrAvailable()) {
+    // Scanned PDF → automatic OCR pass.
+    return ocrPdf(file, (p, total, status) => onProgress(p, total, status || 'OCR'));
+  }
   return {
     kind: 'pdf',
-    pages: numPages,
-    lines: kept,
-    text,
-    hasTextLayer: text.replace(/\s/g, '').length > 20,
+    pages: out.numPages,
+    lines: out.lines,
+    text: out.text,
+    hasTextLayer,
   };
 }
 
@@ -96,7 +354,10 @@ export async function readDocx(file) {
     throw new Error('mammoth.js লোড হয়নি (vendor/mammoth.browser.min.js)। পেজ রিলোড করুন।');
   }
   const arrayBuffer = await file.arrayBuffer();
-  const { value: html } = await lib.convertToHtml({ arrayBuffer });
+  // mammoth's browser build accepts an ArrayBuffer; the npm (Node) build expects a
+  // Buffer-like object ({ buffer, length }). Pass both shapes so either works.
+  const u8 = new Uint8Array(arrayBuffer);
+  const { value: html } = await lib.convertToHtml({ arrayBuffer, buffer: u8 });
   const doc = new DOMParser().parseFromString(html, 'text/html');
   const lines = [];
   for (const el of doc.body.children) {

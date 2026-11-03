@@ -274,8 +274,17 @@ async function handleFile(file) {
     await runPipeline({ name: file.name, text: doc.text, doc });
   } catch (err) {
     console.error(err);
-    stage('read', 'error', 'পড়া যায়নি');
-    alertBox('error', `ফাইল পড়া যায়নি: ${err.message || err}. পুরোনো .doc (DOCX নয়) হলে আগে Word-এ খুলে .docx হিসেবে সেভ করুন।`);
+    const isPdf = (file.name || '').toLowerCase().endsWith('.pdf') || /pdf/i.test(String(err && err.message));
+    stage('read', 'error', isPdf ? 'PDF ব্যর্থ' : 'পড়া যায়নি');
+    if (isPdf) {
+      alertBox('error',
+        `<b>PDF প্রসেসিং ব্যর্থ:</b> ${escapeHtml(err.message || String(err))}<br>` +
+        `১. একবার <b>hard-refresh</b> (Ctrl+Shift+R) দিন — পুরোনো Service Worker ক্যাশ থাকতে পারে।<br>` +
+        `২. স্ক্যান করা (ছবি-ভিত্তিক) PDF হলে OCR দরকার — টেক্সট কপি করে <b>"পেস্ট"</b> ব্যবহার করুন।<br>` +
+        `৩. পাসওয়ার্ড-সুরক্ষিত PDF আনপ্রোটেক্ট করে আবার দিন।`);
+    } else {
+      alertBox('error', `ফাইল পড়া যায়নি: ${escapeHtml(err.message || err)}. পুরোনো .doc (DOCX নয়) হলে আগে Word-এ খুলে .docx হিসেবে সেভ করুন।`);
+    }
   }
 }
 
