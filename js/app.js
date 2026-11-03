@@ -82,7 +82,7 @@ async function runPipeline({ name, text, doc }) {
     stage('detect', 'done', state.encoding.label);
 
     // 3/4. extract + normalize (for files, extraction already happened in readFileAny)
-    state.normalize = normalizeText(text, state.encoding.encoding);
+    state.normalize = convertKeepingTables(text, state.encoding.encoding);
     stage('extract', 'done', `${text.length.toLocaleString()} chars`);
     stage('normalize', 'done', state.normalize.converted
       ? `bijoy→unicode ✓${state.normalize.unmapped ? ` · ${state.normalize.unmapped} unmapped` : ''}`
@@ -101,9 +101,37 @@ async function runPipeline({ name, text, doc }) {
   }
 }
 
+/** Preserve table structure (tab-separated cells) through the Bijoy→Unicode conversion. */
+function convertKeepingTables(text, encoding) {
+  const res = normalizeText(text, encoding);
+  if (!res.converted || !res.text) return res;
+  const srcCells = String(text).split('\t');
+  const outCells = String(res.text).split('\t');
+  if (srcCells.length > 1 && outCells.length !== srcCells.length) {
+    // converter collapsed cell boundaries — re-convert each cell separately
+    res.text = srcCells.map((c) => normalizeText(c, encoding).text).join('\t');
+  }
+  return res;
+}
+
+/** Build parser-ready lines from a normalized text (or reuse structured doc.lines). */
+function normalizeLines(docLines, normalizedText) {
+  const split = (t) => String(t).split(/\r?\n/).map((s) => ({ text: s }));
+  if (Array.isArray(docLines) && docLines.length) {
+    const fileLines = split(normalizedText);
+    if (fileLines.length === docLines.length) {
+      // one-to-one correspondence → keep reader metadata (table flags, page numbers)
+      return docLines.map((l, i) => ({ ...l, text: fileLines[i].text }));
+    }
+  }
+  return split(normalizedText);
+}
+
 async function processText(text) {
-  // 5. parse grid
-  state.grid = parseGrid(text.split(/\r?\n/).map((t) => ({ text: t })));
+  // 5. parse grid — prefer the layout-aware lines from the file reader (PDF/DOCX),
+  // fall back to plain line-splitting for pasted text and samples.
+  const normLines = normalizeLines(state.doc?.lines, state.normalize?.text ?? text);
+  state.grid = parseGrid(normLines);
   if (!state.grid.rows.length) {
     stage('parse', 'error', 'সারি পাওয়া যায়নি');
     alertBox('warn', 'কোনো ডেটা-সারি পার্স করা যায়নি। প্রতি লাইনে "নাম সংখ্যা সংখ্যা ..." ফরম্যাট আশা করা হয়েছে — "পেস্ট" থেকে ম্যানুয়ালি দেওয়ার চেষ্টা করুন।');
