@@ -1,0 +1,20 @@
+{
+  "name": "workspace",
+  "version": "1.0.0",
+  "description": "**দৈনিক প্রতিবেদন পাইপলাইন** — an installable, fully offline PWA that turns a daily return (PDF / DOCX / pasted text, in **Unicode Bengali or legacy Bijoy/SutonnyMJ**) into a validated data grid, a set of arithmetic consistency checks, and a dashboard.",
+  "main": "sw.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "jsdom": "^29.1.1",
+    "mammoth": "^1.13.0",
+    "pdfjs-dist": "^3.11.174"
+  }
+}

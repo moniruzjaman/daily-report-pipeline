@@ -2,25 +2,69 @@
 
 import { foldDigits } from './bijoy.js';
 
+/* ---------------- helpers ---------------- */
+
+/** Robustly locate the pdf.js global regardless of how vendor/pdf.min.js exposed it. */
+function getPdfjsLib() {
+  const g = globalThis;
+  const lib = g.pdfjsLib || g['pdfjs-dist/build/pdf']?.pdfjsLib || g.PDFJS;
+  if (!lib || typeof lib.getDocument !== 'function') {
+    throw new Error('pdf.js লোড হয়নি (vendor/pdf.min.js)। পেজ রিলোড করুন।');
+  }
+  return lib;
+}
+
+/** Configure the pdf.js worker once; fall back to a same-origin fake worker if needed. */
+let pdfConfigured = false;
+function ensurePdfWorker(lib) {
+  if (pdfConfigured) return;
+  try {
+    lib.GlobalWorkerOptions.workerSrc = 'vendor/pdf.worker.min.js';
+    // In some sandboxes Worker/blob URLs are blocked; pdf.js then needs eval-based
+    // fake workers disabled so it can load the worker module via import().
+    if (typeof window === 'undefined' || !window.Worker) {
+      lib.GlobalWorkerOptions.isEvalSupported = false;
+    }
+  } catch { /* older builds without GlobalWorkerOptions — ignore */ }
+  pdfConfigured = true;
+}
+
 /* ---------------- readers ---------------- */
 
 export async function readPdf(file, onProgress = () => {}) {
+  const lib = getPdfjsLib();
+  ensurePdfWorker(lib);
   const buf = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  let pdf;
+  try {
+    pdf = await lib.getDocument({ data: buf, isEvalSupported: false }).promise;
+  } catch (err) {
+    // Common failure in sandboxed contexts: worker creation blocked → retry without eval.
+    if (/worker/i.test(String(err && err.message))) {
+      lib.GlobalWorkerOptions.workerSrc = '';
+      pdf = await lib.getDocument({ data: buf, disableAutoFetch: true, isEvalSupported: false }).promise;
+    } else {
+      throw err;
+    }
+  }
+  const numPages = pdf.numPages || 1;
   const pages = [];
-  for (let p = 1; p <= pdf.numPages; p++) {
-    onProgress(p, pdf.numPages);
+  for (let p = 1; p <= numPages; p++) {
+    onProgress(p, numPages);
     const page = await pdf.getPage(p);
     const tc = await page.getTextContent();
-    const lines = groupIntoLines(tc.items);
+    const lines = groupIntoLines(tc.items).map((l) => ({ ...l, page: p }));
     pages.push(lines);
   }
   const allLines = pages.flat();
-  const text = allLines.map((l) => l.text).join('\n');
+  // keep only non-empty lines; rebuild text from them so doc.lines and doc.text
+  // stay aligned one-line-per-row for the grid parser
+  const kept = allLines.filter((l) => l.text);
+  const text = kept.map((l) => l.text).join('\n');
   return {
     kind: 'pdf',
-    pages: pdf.numPages,
-    lines: allLines.map((l, i) => ({ ...l, page: Math.floor(i / pdf.numPages) + 1 })),
+    pages: numPages,
+    lines: kept,
     text,
     hasTextLayer: text.replace(/\s/g, '').length > 20,
   };
@@ -47,8 +91,12 @@ function groupIntoLines(items) {
 }
 
 export async function readDocx(file) {
+  const lib = globalThis.mammoth;
+  if (!lib || typeof lib.convertToHtml !== 'function') {
+    throw new Error('mammoth.js লোড হয়নি (vendor/mammoth.browser.min.js)। পেজ রিলোড করুন।');
+  }
   const arrayBuffer = await file.arrayBuffer();
-  const { value: html } = await mammoth.convertToHtml({ arrayBuffer });
+  const { value: html } = await lib.convertToHtml({ arrayBuffer });
   const doc = new DOMParser().parseFromString(html, 'text/html');
   const lines = [];
   for (const el of doc.body.children) {
@@ -72,10 +120,22 @@ export async function readTxt(file) {
   return { kind: 'txt', pages: 1, lines, text, hasTextLayer: text.trim().length > 0 };
 }
 
+/** Detect the container by magic bytes — more reliable than the file name alone. */
+async function sniffKind(file) {
+  const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+  if (head.length >= 4 && head[0] === 0x25 && head[1] === 0x50 && head[2] === 0x44 && head[3] === 0x46) return 'pdf'; // %PDF
+  if (head.length >= 2 && head[0] === 0x50 && head[1] === 0x4b) return 'zip'; // ZIP → docx (or legacy .doc renamed)
+  return null;
+}
+
 export async function readFileAny(file, onProgress) {
-  const name = file.name.toLowerCase();
-  if (name.endsWith('.pdf')) return readPdf(file, onProgress);
-  if (name.endsWith('.docx')) return readDocx(file);
+  const name = (file.name || '').toLowerCase();
+  const sniffed = await sniffKind(file);
+  if (sniffed === 'pdf' || (!sniffed && name.endsWith('.pdf'))) return readPdf(file, onProgress);
+  if (sniffed === 'zip' || name.endsWith('.docx')) return readDocx(file); // .docx is a ZIP container
+  if (name.endsWith('.doc')) {
+    throw new Error('পুরোনো বাইনারি .doc সাপোর্টেড নয় — Word-এ খুলে .docx হিসেবে সেভ করে আবার দিন।');
+  }
   return readTxt(file);
 }
 
